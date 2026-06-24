@@ -3,10 +3,13 @@ package main
 import (
 	"bufio"
 	"encoding/csv"
+	"encoding/gob"
+	"flag"
 	"fmt"
 	"io"
 	"math"
 	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 
@@ -72,6 +75,55 @@ func (network *Network) Train(input, output []float64) {
 	backPropagation2 = dotProduct(backPropagation2, inputs.T())
 	backPropagation2 = scale(backPropagation2, network.learningRate)
 	network.hiddenWeights = sum(network.hiddenWeights, backPropagation2).(*mat.Dense)
+
+}
+
+func (network *Network) Save(filename string) error {
+
+	file, err := os.Create(filename)
+	if err != nil {
+
+		return err
+	}
+
+	defer file.Close()
+
+	encoder := gob.NewEncoder(file)
+
+	err = encoder.Encode(network.hiddenWeights)
+	if err != nil {
+
+		return err
+	}
+	err = encoder.Encode(network.outputWeights)
+	return err
+
+}
+
+func (network *Network) Load(filename string) error {
+
+	file, err := os.Open(filename)
+	if err != nil {
+
+		return err
+	}
+
+	defer file.Close()
+
+	decoder := gob.NewDecoder(file)
+
+	network.hiddenWeights = &mat.Dense{}
+	network.outputWeights = &mat.Dense{}
+
+	err = decoder.Decode(network.hiddenWeights)
+	if err != nil {
+
+		return err
+	}
+
+	err = decoder.Decode(network.outputWeights)
+
+	return err
 
 }
 
@@ -156,7 +208,7 @@ func apply(fn func(r, c int, v float64) float64, m mat.Matrix) mat.Matrix {
 	return o
 }
 
-func testWorker(network *Network, wg *sync.WaitGroup, lineChannel chan []string, resultsChannel chan int) {
+func testWorker(network Network, wg *sync.WaitGroup, lineChannel chan []string, resultsChannel chan int) {
 
 	defer wg.Done()
 
@@ -220,55 +272,112 @@ func fetchResults(results chan int, score *int, total *int, fetchFinale *sync.Wa
 
 func main() {
 
+	csvpaths := flag.String("csv", "csv", "Directory where the csv are located")
+	trainflag := flag.Bool("t", false, "This flag tells the program to NOT train before testing the neural network")
+	Saveflag := flag.Bool("s", false, "This flag tells the program to save the Weights for future iterations")
+	deleteSavedDataflag := flag.Bool("d", false, "This flag tells the program to deleted the previous saved data")
+
+	flag.Parse()
+
+	mustTrain := !(*trainflag)
+	mustSave := *Saveflag
+	mustDelete := *deleteSavedDataflag
+	csvpath := *csvpaths
+
 	network := CreateNetwork(784, 200, 10, 0.1)
 
-	trainFile, err := os.Open("csv/mnist_train.csv")
 	lineChannel := make(chan []string, 50)
 	resultChannel := make(chan int, 50)
 	var wg sync.WaitGroup
 	var fetchFinale sync.WaitGroup
 
+	if !mustDelete {
+		_, existErr := os.Stat("savedData")
+		if existErr == nil {
+
+			loadErr := network.Load("savedData")
+
+			if loadErr != nil {
+
+				fmt.Printf("There was an error loading the previous data \n")
+				return
+
+			}
+
+		} else {
+
+			fmt.Printf("There is no file with previous data, training will begin from scratch.\n")
+		}
+
+	} else {
+
+		fmt.Printf("The saved data will be deleted")
+
+		_, existErr1 := os.Stat("savedData")
+		if existErr1 == nil {
+
+			removeError := os.Remove("savedData")
+
+			if removeError != nil {
+
+				fmt.Printf("There was an error deleting the savedData file\n")
+				return
+			}
+
+		} else {
+
+			fmt.Printf("The -d flag was passed, but savedData already doesnt exist\n")
+		}
+
+	}
+
+	trainFile, err := os.Open(filepath.Join(csvpath, "mnist_train.csv"))
+
 	if err != nil {
 
-		fmt.Printf("There was an error opening mnist_train.csv")
+		fmt.Printf("There was an error opening mnist_train.csv\n")
 		return
 	}
 	reader := csv.NewReader(bufio.NewReader(trainFile))
 
-	for {
+	if mustTrain {
 
-		line, err := reader.Read()
+		for {
 
-		if err == io.EOF {
+			line, err := reader.Read()
 
-			break
+			if err == io.EOF {
+
+				break
+
+			}
+
+			header, err1 := strconv.Atoi(line[0])
+			if err1 != nil {
+
+				fmt.Printf("Hubo un error an intentar convertir el valor ASCII del header del csv a int en trainFile\n")
+			}
+			target := make([]float64, 10)
+			for i := range target {
+
+				target[i] = 0.01
+
+			}
+
+			target[header] = 0.99
+
+			inputs := make([]float64, 784)
+
+			for i := 0; i < 784; i++ {
+
+				pixelStr := line[i+1]
+				pixelVal, _ := strconv.ParseFloat(pixelStr, 64)
+				inputs[i] = (pixelVal / 255 * 0.99) + 0.01
+			}
+
+			network.Train(inputs, target)
 
 		}
-
-		header, err1 := strconv.Atoi(line[0])
-		if err1 != nil {
-
-			fmt.Printf("Hubo un error an intentar convertir el valor ASCII del header del csv a int en trainFile")
-		}
-		target := make([]float64, 10)
-		for i := range target {
-
-			target[i] = 0.01
-
-		}
-
-		target[header] = 0.99
-
-		inputs := make([]float64, 784)
-
-		for i := 0; i < 784; i++ {
-
-			pixelStr := line[i+1]
-			pixelVal, _ := strconv.ParseFloat(pixelStr, 64)
-			inputs[i] = (pixelVal / 255 * 0.99) + 0.01
-		}
-
-		network.Train(inputs, target)
 
 	}
 
@@ -277,7 +386,7 @@ func main() {
 	score := 0
 	total := 0
 
-	testFile, err := os.Open("csv/mnist_test.csv")
+	testFile, err := os.Open(filepath.Join(csvpath, "mnist_test.csv"))
 
 	if err != nil {
 
@@ -293,7 +402,7 @@ func main() {
 	for j := 0; j < 4; j++ {
 
 		wg.Add(1)
-		go testWorker(&network, &wg, lineChannel, resultChannel)
+		go testWorker(network, &wg, lineChannel, resultChannel)
 
 	}
 
@@ -324,7 +433,13 @@ func main() {
 
 	} else {
 
-		fmt.Printf("There was no image to process")
+		fmt.Printf("There was no image to process\n")
+
+	}
+
+	if mustSave {
+
+		network.Save("savedData")
 
 	}
 
